@@ -1,0 +1,8 @@
+{
+  "showMiniHud": true,
+  "autoFollowNotify": true,
+  "followThresholdMeters": 350,
+  "pingDurationSec": 25,
+  "miniHudX": 24,
+  "miniHudY": 24
+}

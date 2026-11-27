@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ChoomSync — Cyberpunk 2077 (2.5) Tailscale Co-op</title>
+  <style>
+    :root {
+      --bg: #0c0d12;
+      --card: #141620;
+      --border: #25293b;
+      --text: #e9ecf5;
+      --muted: #939bb4;
+      --yellow: #fcee0a;
+      --cyan: #00f0ff;
+      --green: #38e58c;
+      --red: #ff4769;
+      --amber: #ffb84d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 24px; background: var(--bg); color: var(--text);
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    }
+    .wrap { max-width: 980px; margin: 0 auto; }
+    header {
+      display: flex; justify-content: space-between; align-items: center; gap: 16px;
+      border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 20px;
+    }
+    h1 { margin: 0; font-size: 22px; letter-spacing: 0.06em; color: var(--yellow); text-transform: uppercase; }
+    .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+    .card {
+      background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px;
+    }
+    .card h2 {
+      margin: 0 0 12px; font-size: 14px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--cyan);
+    }
+    .row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #1d2030; font-size: 13px; }
+    .row:last-child { border-bottom: none; }
+    .badge { padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+    .ok { background: rgba(56,229,140,.15); color: var(--green); }
+    .warn { background: rgba(255,184,77,.15); color: var(--amber); }
+    .bad { background: rgba(255,71,105,.15); color: var(--red); }
+    button {
+      background: #1f2436; color: var(--text); border: 1px solid #323955; border-radius: 7px;
+      padding: 8px 13px; font-size: 13px; font-weight: 600; cursor: pointer;
+    }
+    button:hover { border-color: var(--cyan); }
+    button.primary { background: var(--yellow); color: #0c0d12; border-color: var(--yellow); }
+    button.primary:hover { filter: brightness(1.06); }
+    input, select, textarea {
+      width: 100%; background: #0e1018; color: var(--text); border: 1px solid var(--border);
+      border-radius: 6px; padding: 8px 10px; font-size: 13px; font-family: inherit;
+    }
+    textarea { font-family: Consolas, monospace; min-height: 70px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .mono { font-family: Consolas, monospace; font-size: 12px; color: var(--muted); }
+    .toast {
+      margin-bottom: 16px; padding: 10px 14px; border-radius: 8px; font-size: 13px;
+      background: rgba(0,240,255,.1); border: 1px solid rgba(0,240,255,.35); display: none;
+    }
+    a { color: var(--cyan); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>ChoomSync // NightCoop Tailscale Launcher</h1>
+        <div class="sub" id="subtitle">Checking Cyberpunk 2077 (Patch 2.5) &amp; Tailscale...</div>
+      </div>
+      <div class="actions" style="margin:0">
+        <button onclick="refresh()">Refresh</button>
+        <button class="primary" onclick="launchGame()">Backup Saves &amp; Launch Cyberpunk 2077</button>
+      </div>
+    </header>
+
+    <div class="toast" id="toast"></div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>Mod Stack &amp; Patch 2.5 Health</h2>
+        <div id="stackList">Loading...</div>
+        <div class="actions">
+          <button onclick="clearCache()">Clear Stale Script Cache</button>
+          <button onclick="backupNow()">Backup Saves Now</button>
+        </div>
+        <div class="mono" id="backupInfo" style="margin-top:10px"></div>
+      </div>
+
+      <div class="card">
+        <h2>Tailscale Link &amp; Peer</h2>
+        <div id="tsSelf" class="mono" style="margin-bottom:10px"></div>
+        <label class="mono">Select Friend's Tailscale PC:</label>
+        <select id="peerSelect" onchange="saveConfig()" style="margin:6px 0 10px"></select>
+        <div id="tsPeerInfo"></div>
+        <div class="sub" style="margin-top:10px">
+          Live Tailscale status is automatically synced to your in-game ChoomSync HUD.
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Tailscale Peer Sync (Opt-In)</h2>
+        <div class="sub" style="margin-bottom:10px">
+          Off by default. When enabled, binds strictly to your Tailscale IPv4 (100.x.x.x) with your shared Pairing Code for mod parity checks &amp; 1-click invite clipboard relay.
+        </div>
+        <label class="mono">Shared Pairing Code (give same code to your friend):</label>
+        <input id="pairingSecret" type="text" style="margin:6px 0 10px" />
+        <div class="actions">
+          <button onclick="saveConfig()">Save Code</button>
+          <button id="peerToggleBtn" onclick="togglePeerSync()">Enable Peer Sync</button>
+          <button onclick="checkParity()">Check Friend's Mod Parity</button>
+        </div>
+        <div id="parityOut" class="mono" style="margin-top:10px"></div>
+        <div style="margin-top:12px; border-top:1px solid #1d2030; padding-top:10px">
+          <label class="mono">Relay NightCoop Invite Code straight to Friend's Clipboard:</label>
+          <div style="display:flex; gap:8px; margin-top:6px">
+            <input id="inviteInput" placeholder="Paste NightCoop invite code here..." />
+            <button onclick="sendInvite()">Send</button>
+          </div>
+          <div id="receivedInvite" class="mono" style="margin-top:8px; color:var(--green)"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Custom NightCoop Hub (Optional)</h2>
+        <div class="sub" style="margin-bottom:8px">
+          NightCoop's official hubs already establish direct end-to-end encrypted P2P connections. Only edit <code>servers.txt</code> if you run a private hub (<code>100.x.x.x#FINGERPRINT</code>).
+        </div>
+        <textarea id="serversTxt" placeholder="Leave blank to use NightCoop official hubs"></textarea>
+        <div class="actions">
+          <button onclick="saveServersTxt()">Save servers.txt</button>
+        </div>
+        <div id="hooksBox" style="margin-top:12px"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const TOKEN = "__CHOOMSYNC_TOKEN__";
+    let lastStatus = null;
+
+    async function api(path, method = "GET", body = null) {
+      const res = await fetch(path, {
+        method,
+        headers: {
+          "X-ChoomSync-Token": TOKEN,
+          ...(body ? { "Content-Type": "application/json" } : {})
+        },
+        body: body ? JSON.stringify(body) : null
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+      return data;
+    }
+
+    function showToast(msg) {
+      const el = document.getElementById("toast");
+      el.textContent = msg;
+      el.style.display = "block";
+    }
+
+    function badge(ok, textOk, textBad) {
+      return `<span class="badge ${ok ? "ok" : "bad"}">${ok ? textOk : textBad}</span>`;
+    }
+
+    async function refresh() {
+      try {
+        const s = await api("/api/status");
+        lastStatus = s;
+        const m = s.manifest;
+        document.getElementById("subtitle").textContent = m.found
+          ? `${m.gameDir} (Patch ${m.exeVersion?.ProductVersion || "?"})`
+          : "Cyberpunk 2077 install not detected yet";
+
+        if (m.found) {
+          const rows = [
+            ["Cyberpunk 2077 Patch 2.5", m.exeVersion?.ProductVersion === "2.5", m.exeVersion?.ProductVersion || "?", "Mismatch"],
+            ["NightCoop (0.2.2-beta)", m.components.nightCoop.installed, "Installed", "Missing"],
+            ["RED4ext (bundled)", m.components.red4ext.installed, "Installed", "Missing"],
+            ["Cyber Engine Tweaks (1.38.1)", m.components.cet.installed, "Installed", "Missing"],
+            ["redscript (1.0.2)", m.components.redscript.installed, "Installed", "Missing"],
+            ["ChoomSync Companion Mod", m.components.choomSync.installed, "Installed", "Missing"],
+          ];
+          document.getElementById("stackList").innerHTML = rows
+            .map(([label, ok, a, b]) => `<div class="row"><span>${label}</span>${badge(ok, a, b)}</div>`)
+            .join("");
+          document.getElementById("serversTxt").value = m.serversTxt || "";
+          document.getElementById("hooksBox").innerHTML = m.hooksWarnings.length
+            ? `<div class="badge warn">Hook overlap notes (${m.hooksWarnings.length})</div><div class="mono" style="margin-top:6px">${m.hooksWarnings.slice(0, 4).join("<br>")}</div>`
+            : `<span class="badge ok">Zero hook conflicts logged</span>`;
+        }
+
+        const latestBackup = s.backups[0];
+        document.getElementById("backupInfo").textContent = latestBackup
+          ? `Latest backup: ${latestBackup.name} (${latestBackup.saveFolders} saves)`
+          : "No save backup yet.";
+
+        const ts = s.tailscale;
+        document.getElementById("tsSelf").textContent = ts.available
+          ? `This PC: ${ts.self.hostName} (${ts.self.ip})`
+          : `Tailscale unavailable: ${ts.error || "not running"}`;
+
+        const sel = document.getElementById("peerSelect");
+        sel.innerHTML = `<option value="">-- Select Peer --</option>` + (ts.peers || [])
+          .map((p) => `<option value="${p.ip}" ${p.ip === s.config.selectedPeerIp ? "selected" : ""}>${p.hostName} (${p.ip}) ${p.online ? "[Online]" : "[Offline]"}</option>`)
+          .join("");
+
+        const ap = ts.activePeer;
+        document.getElementById("tsPeerInfo").innerHTML = ap
+          ? `<div class="row"><span>Link Mode</span><span class="badge ${ap.direct ? "ok" : "warn"}">${ap.direct ? "DIRECT P2P" : "DERP RELAY (" + (ap.relay || "?") + ")"}</span></div>
+             <div class="row"><span>Ping</span><span class="mono">${ap.rttMs != null ? ap.rttMs + " ms" : "n/a"}</span></div>`
+          : `<div class="mono">No active Tailscale peer selected.</div>`;
+
+        document.getElementById("pairingSecret").value = s.config.pairingSecret || "";
+        const btn = document.getElementById("peerToggleBtn");
+        btn.textContent = s.peerSync.running ? `Stop Peer Sync (${s.peerSync.listening})` : "Enable Peer Sync";
+        document.getElementById("receivedInvite").textContent = s.peerSync.lastReceivedInvite
+          ? `Last invite copied to clipboard: ${s.peerSync.lastReceivedInvite.code} (from ${s.peerSync.lastReceivedInvite.fromIp})`
+          : "";
+      } catch (e) {
+        showToast("Error: " + e.message);
+      }
+    }
+
+    async function saveConfig() {
+      await api("/api/config", "POST", {
+        selectedPeerIp: document.getElementById("peerSelect").value,
+        pairingSecret: document.getElementById("pairingSecret").value
+      });
+      showToast("Saved launcher settings.");
+      refresh();
+    }
+
+    async function backupNow() {
+      const r = await api("/api/backup", "POST", {});
+      showToast(r.ok ? `Backed up ${r.saveFolders} save folders.` : ("Backup failed: " + r.error));
+      refresh();
+    }
+
+    async function clearCache() {
+      const r = await api("/api/clear-cache", "POST", {});
+      showToast(r.removed.length ? "Cleared stale modded script cache." : "Script cache was already clean.");
+    }
+
+    async function saveServersTxt() {
+      await api("/api/servers-txt", "POST", { content: document.getElementById("serversTxt").value });
+      showToast("Saved red4ext/plugins/NightCoop/servers.txt");
+    }
+
+    async function launchGame() {
+      showToast("Backing up saves & launching Cyberpunk 2077...");
+      const r = await api("/api/launch", "POST", { backupFirst: true });
+      showToast(r.ok ? `Launched (${r.launch.method})! Backup saved.` : "Launch failed.");
+      refresh();
+    }
+
+    async function togglePeerSync() {
+      const running = lastStatus?.peerSync?.running;
+      const r = await api(running ? "/api/peer-sync/stop" : "/api/peer-sync/start", "POST", {});
+      showToast(running ? "Tailscale Peer Sync stopped." : (r.ok ? `Listening on ${r.listening} (Tailscale only)` : r.error));
+      refresh();
+    }
+
+    async function checkParity() {
+      const peerIp = document.getElementById("peerSelect").value;
+      if (!peerIp) return showToast("Select a Tailscale peer first.");
+      try {
+        const r = await api("/api/peer/check", "POST", { peerIp });
+        document.getElementById("parityOut").textContent = r.inSync
+          ? `All 5 core components match ${r.remote.hostName} identically!`
+          : `Mismatches with ${r.remote.hostName}: ` + r.diffs.map((d) => `${d.component} (you:${d.local} vs peer:${d.remote})`).join(", ");
+      } catch (e) {
+        document.getElementById("parityOut").textContent = "Parity check failed: " + e.message;
+      }
+    }
+
+    async function sendInvite() {
+      const peerIp = document.getElementById("peerSelect").value;
+      const code = document.getElementById("inviteInput").value.trim();
+      if (!peerIp || !code) return showToast("Select a peer and paste a NightCoop invite code.");
+      try {
+        await api("/api/peer/send-invite", "POST", { peerIp, code });
+        showToast("Invite code sent directly to friend's clipboard!");
+      } catch (e) {
+        showToast("Invite send failed: " + e.message);
+      }
+    }
+
+    refresh();
+  </script>
+</body>
+</html>

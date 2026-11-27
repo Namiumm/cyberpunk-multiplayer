@@ -1,0 +1,10 @@
+{
+  "name": "choomsync-launcher",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Tailscale-native Cyberpunk 2077 (Patch 2.5) Co-op Launcher & Companion for NightCoop + ChoomSync (zero npm dependencies)",
+  "scripts": {
+    "start": "node server.mjs"
+  }
+}

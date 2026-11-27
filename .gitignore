@@ -1,0 +1,6 @@
+launcher/launcher-config.json
+mod/cet/ChoomSync/tailscale_status.json
+dist/
+vendor/
+*.zip
+node_modules/

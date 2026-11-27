@@ -1,11 +1,11 @@
 {
     "schema":  1,
-    "version":  "0.2.0",
+    "version":  "0.3.0",
     "gameVersion":  "2.5",
     "launcher":  {
-                     "version":  "0.2.0",
-                     "url":  "https://github.com/Namiumm/cyberpunk-multiplayer/releases/download/v0.2.0/ChoomSync.exe",
-                     "sha256":  "9561a4fb0b8ca0c500ec35d40076a1dd0cd2ebab17a6f461fc91d93ce210dd6d"
+                     "version":  "0.3.0",
+                     "url":  "https://github.com/Namiumm/cyberpunk-multiplayer/releases/download/v0.3.0/ChoomSync.exe",
+                     "sha256":  "4bd5775aaa88b0fb7b4b55f47d02a175c81ebab160335168ce99c9088322e298"
                  },
     "nightCoop":  {
                       "version":  "0.2.2-beta",
@@ -26,7 +26,7 @@
                      {
                          "name":  "init.lua",
                          "url":  "https://raw.githubusercontent.com/Namiumm/cyberpunk-multiplayer/master/mod/cet/ChoomSync/init.lua",
-                         "sha256":  "8c83c8b0b54b378978cdebaf77785c1ed2b24b11d1b86d8d730787f2666ef789"
+                         "sha256":  "bad7c3a189da42933504c6f9815c41e6a38c6ebe2a99da804a0afe76fc25922d"
                      },
                      {
                          "name":  "nightcoop_sdk.lua",

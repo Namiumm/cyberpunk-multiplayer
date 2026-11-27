@@ -6,5 +6,7 @@
   "pingDurationSec": 25,
   "miniHudX": 24,
   "miniHudY": 24,
-  "perfPreset": "balanced"
+  "perfPreset": "ultra_smooth",
+  "dynamicAutoScale": false,
+  "targetFps": 90
 }

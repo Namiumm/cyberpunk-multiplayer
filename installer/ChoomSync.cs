@@ -30,8 +30,8 @@ using Microsoft.Win32;
 
 [assembly: AssemblyTitle("ChoomSync — Cyberpunk 2077 Co-op & Optimizer")]
 [assembly: AssemblyDescription("1-Click Auto-Updating Co-op Installer, Base-Game Performance Pack & Launcher for Cyberpunk 2077 (Patch 2.5)")]
-[assembly: AssemblyVersion("0.2.0.0")]
-[assembly: AssemblyFileVersion("0.2.0.0")]
+[assembly: AssemblyVersion("0.3.0.0")]
+[assembly: AssemblyFileVersion("0.3.0.0")]
 
 namespace ChoomSync
 {
@@ -79,7 +79,7 @@ namespace ChoomSync
 
     internal static class Program
     {
-        public const string APP_VERSION = "0.2.0";
+        public const string APP_VERSION = "0.3.0";
         public const string MANIFEST_URL = "https://raw.githubusercontent.com/Namiumm/cyberpunk-multiplayer/master/manifest.json";
         public const string TAILSCALE_URL = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe";
 
@@ -127,12 +127,37 @@ namespace ChoomSync
                 {
                     return RunSelfCheck(true);
                 }
+                if (string.Equals(args[0], "--apply-perf", StringComparison.OrdinalIgnoreCase))
+                {
+                    return RunApplyPerfCli();
+                }
             }
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new MainForm());
             return 0;
+        }
+
+        private static int RunApplyPerfCli()
+        {
+            string gameDir = CoopEngine.DetectGameDir();
+            if (!CoopEngine.IsValidGameDir(gameDir))
+            {
+                Console.WriteLine("PERF_ERR gameDir not found");
+                return 1;
+            }
+            try
+            {
+                PerfOptimizer.ApplyBaseGamePerfPack(gameDir, delegate (string msg) { Console.WriteLine(msg); });
+                Console.WriteLine("PERF_OK app=" + APP_VERSION + " hags=" + (PerfOptimizer.IsHagsEnabled() ? "on" : "off"));
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("PERF_ERR " + ex.Message);
+                return 1;
+            }
         }
 
         private static int RunSelfCheck(bool fetchRemote)
@@ -165,7 +190,7 @@ namespace ChoomSync
             }
 
             Console.WriteLine(string.Format(
-                "VERIFY_OK app={0} gameDir={1} gameVer={2} hw=({3},{4}c,{5}GB,{6}GBvram) embedded=(init:{7},sdk:{8},cfg:{9}) installed={10} remote={11}",
+                "VERIFY_OK app={0} gameDir={1} gameVer={2} hw=({3},{4}c,{5}GB,{6}GBvram) hags={7} perfCurrent={8} embedded=(init:{9},sdk:{10},cfg:{11}) installed={12} remote={13}",
                 APP_VERSION,
                 gameDir ?? "(not found)",
                 ver ?? "?",
@@ -173,6 +198,8 @@ namespace ChoomSync
                 hw.LogicalCores,
                 hw.RamGb,
                 hw.VramGb,
+                PerfOptimizer.IsHagsEnabled() ? "on" : "off",
+                gameDir != null && PerfOptimizer.IsPerfPackCurrent(gameDir),
                 hasInit,
                 hasSdk,
                 hasCfg,
@@ -285,9 +312,131 @@ namespace ChoomSync
             return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"CD Projekt Red\Cyberpunk 2077\UserSettings.pre-choomsync.json");
         }
 
+        public const string PERF_INI_TAG = "ChoomSync v0.3.0";
+
         public static bool IsPerfPackApplied(string gameDir)
         {
             return CoopEngine.IsValidGameDir(gameDir) && File.Exists(GetPerfIniPath(gameDir));
+        }
+
+        public static bool IsPerfPackCurrent(string gameDir)
+        {
+            if (!IsPerfPackApplied(gameDir)) return false;
+            try
+            {
+                string head = File.ReadAllText(GetPerfIniPath(gameDir), Encoding.UTF8);
+                return head.IndexOf(PERF_INI_TAG, StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            catch { return false; }
+        }
+
+        public static bool IsHagsEnabled()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\GraphicsDrivers"))
+                {
+                    if (key == null) return false;
+                    object val = key.GetValue("HwSchMode");
+                    return val != null && Convert.ToInt32(val) == 2;
+                }
+            }
+            catch { return false; }
+        }
+
+        public static bool IsGameModeEnabled()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\GameBar"))
+                {
+                    if (key == null) return false;
+                    object val = key.GetValue("AutoGameModeEnabled");
+                    return val != null && Convert.ToInt32(val) == 1;
+                }
+            }
+            catch { return false; }
+        }
+
+        public static bool EnableHagsAndGameMode(Action<string> log)
+        {
+            // 1. Windows Game Mode (HKCU, no elevation required)
+            try
+            {
+                using (RegistryKey gb = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\GameBar"))
+                {
+                    if (gb != null)
+                    {
+                        gb.SetValue("AutoGameModeEnabled", 1, RegistryValueKind.DWord);
+                        log("Enabled Windows Game Mode (AutoGameModeEnabled=1).");
+                    }
+                }
+            }
+            catch (Exception ex) { log("Game Mode setting note: " + ex.Message); }
+
+            // 2. Hardware-Accelerated GPU Scheduling (HKLM, unlocks DLSS Frame Gen on RTX 40/50)
+            if (IsHagsEnabled())
+            {
+                log("Windows HAGS (Hardware-Accelerated GPU Scheduling) is already enabled.");
+                return true;
+            }
+
+            try
+            {
+                using (RegistryKey gd = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\GraphicsDrivers", true))
+                {
+                    if (gd != null)
+                    {
+                        gd.SetValue("HwSchMode", 2, RegistryValueKind.DWord);
+                        log("Enabled Windows HAGS (HwSchMode=2). Reboot once to activate DLSS Frame Generation!");
+                        return true;
+                    }
+                }
+            }
+            catch { }
+
+            // Not elevated yet — request UAC solely for reg.exe add
+            ProcessStartInfo psi = new ProcessStartInfo("reg.exe", @"add ""HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"" /v HwSchMode /t REG_DWORD /d 2 /f");
+            psi.Verb = "runas";
+            psi.UseShellExecute = true;
+            psi.WindowStyle = ProcessWindowStyle.Hidden;
+            using (Process p = Process.Start(psi))
+            {
+                if (p != null) p.WaitForExit(15000);
+            }
+
+            if (IsHagsEnabled())
+            {
+                log("Enabled Windows HAGS (HwSchMode=2). Reboot Windows once to unlock DLSS Frame Gen!");
+                return true;
+            }
+            log("HAGS change was not applied (UAC cancelled or policy-blocked).");
+            return false;
+        }
+
+        public static bool AddDefenderExclusion(string gameDir, Action<string> log)
+        {
+            if (!CoopEngine.IsValidGameDir(gameDir)) return false;
+            string escaped = gameDir.Replace("'", "''");
+            string script = "Add-MpPreference -ExclusionPath '" + escaped + "'";
+            string b64 = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+
+            ProcessStartInfo psi = new ProcessStartInfo("powershell.exe", "-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand " + b64);
+            psi.Verb = "runas";
+            psi.UseShellExecute = true;
+            psi.WindowStyle = ProcessWindowStyle.Hidden;
+            using (Process p = Process.Start(psi))
+            {
+                if (p == null) return false;
+                p.WaitForExit(20000);
+                if (p.ExitCode == 0)
+                {
+                    log("Added Windows Defender folder exclusion for Cyberpunk 2077 (stops .archive scan hitches).");
+                    return true;
+                }
+                log("Defender exclusion returned exit code " + p.ExitCode + " (third-party AV may be managing Defender).");
+                return false;
+            }
         }
 
         public static void ApplyBaseGamePerfPack(string gameDir, Action<string> log)
@@ -296,34 +445,124 @@ namespace ChoomSync
             log(string.Format("Detected hardware: {0} ({1}GB VRAM), {2} threads, {3}GB RAM -> {4} tier",
                 hw.GpuName, hw.VramGb, hw.LogicalCores, hw.RamGb, hw.Tier));
 
-            // 1. Write hardware-tiered REDengine 4 streaming & shadow INI
+            // 1. Write crash-free, visual-preserving REDengine 4 streaming, batching, VRS, AsyncCompute, RT & denoiser INI.
+            //    Engine CVars derived from MIT-licensed sammilucia/cyberpunk-ultra-plus (crash-tested on Patch 2.x / 2.5).
             string iniPath = GetPerfIniPath(gameDir);
             Directory.CreateDirectory(Path.GetDirectoryName(iniPath));
 
-            int maxNodes = hw.Tier == "Enthusiast" ? 5000 : (hw.Tier == "High" ? 3500 : 2000);
-            int editorNodes = hw.Tier == "Enthusiast" ? 6000 : (hw.Tier == "High" ? 4000 : 2500);
-            string minDist = hw.Tier == "Enthusiast" ? "55.000000" : (hw.Tier == "High" ? "45.000000" : "35.000000");
+            string minDist = hw.Tier == "Enthusiast" ? "45.0" : (hw.Tier == "High" ? "35.0" : "25.0");
             string decalsDist = hw.Tier == "Enthusiast" ? "40.0" : (hw.Tier == "High" ? "30.0" : "20.0");
 
+            // VRAM-tiered ResourceLoaderThrottler & RayTracing BVH budgets (NEVER touches DedicatedDecompressionMemoryBytes -> CTD!)
+            int floodThreads = hw.VramGb >= 20 ? 3 : 2;
+            int streamThreads = hw.VramGb >= 20 ? 3 : 2;
+            int trickleThreads = hw.VramGb >= 20 ? 2 : 1;
+            int rtAsBuild = hw.VramGb >= 20 ? 128 : (hw.VramGb >= 15 ? 112 : (hw.VramGb >= 11 ? 96 : 80));
+            int rtProxyMax = hw.VramGb >= 20 ? 320 : (hw.VramGb >= 15 ? 256 : (hw.VramGb >= 11 ? 224 : 192));
+
             StringBuilder ini = new StringBuilder();
-            ini.AppendLine("; ChoomSync Base-Game Performance & Stutter Pack (Patch 2.5)");
-            ini.AppendLine(string.Format("; Hardware Tier: {0} ({1}, {2}GB VRAM, {3} threads)", hw.Tier, hw.GpuName, hw.VramGb, hw.LogicalCores));
+            ini.AppendLine("; " + PERF_INI_TAG + " — Ultra-Smooth Base-Game Performance & Stutter Pack (Patch 2.5)");
+            ini.AppendLine("; Visual-first engine optimizations (zero potato-mode, zero CTD memory overrides, 100% reversible).");
+            ini.AppendLine("; Credit: REDengine 4 streaming/batching/VRS/RT/denoiser tuning inspired by sammilucia/cyberpunk-ultra-plus (MIT).");
+            ini.AppendLine(string.Format("; Hardware Tier: {0} ({1}, {2}GB VRAM, {3} threads, {4}GB RAM)", hw.Tier, hw.GpuName, hw.VramGb, hw.LogicalCores, hw.RamGb));
             ini.AppendLine();
             ini.AppendLine("[Streaming]");
-            ini.AppendLine("EditorThrottledMaxNodesPerFrame = " + editorNodes);
-            ini.AppendLine("MaxNodesPerFrame = " + maxNodes);
+            ini.AppendLine("MaxNodesPerFrame = 700");
+            ini.AppendLine("MaxNodesPerFrameWhileLoading = 100000");
+            ini.AppendLine("TimeLimitAttachingPerFrame = 0.5");
+            ini.AppendLine("TimeLimitSectorLoadPerFrame = 2.5");
+            ini.AppendLine("TimeLimitSectorUnloadPerFrame = 2.5");
+            ini.AppendLine("TimeLimitStreamedPerFrame = 3.0");
+            ini.AppendLine("TimeLimitStreamedPerFrameWhileLoading = 8.0");
+            ini.AppendLine("ObserverVelocityOffsetEnabled = true");
+            ini.AppendLine("ObserverMaxNonAirVehicleForwardVelocity = 600.0");
             ini.AppendLine("MinStreamingDistance = " + minDist);
+            ini.AppendLine();
+            ini.AppendLine("[World]");
+            ini.AppendLine("StreamingTeleportMagSq = 8192.0");
+            ini.AppendLine();
+            ini.AppendLine("[ResourceLoaderThrottler]");
+            ini.AppendLine("FloodMinNonLoadingThreads = " + floodThreads);
+            ini.AppendLine("StreamMaxLoadingThreads = " + streamThreads);
+            ini.AppendLine("TrickleMaxLoadingThreads = " + trickleThreads);
+            ini.AppendLine();
+            ini.AppendLine("[PersistencySystem]");
+            ini.AppendLine("CheckSkipPreReserialisation = true");
+            ini.AppendLine("CheckSkipPostReserialisation = true");
+            ini.AppendLine();
+            ini.AppendLine("[Rendering]");
+            ini.AppendLine("DistantShadowsMaxBatchSize = 3000");
+            ini.AppendLine("DistantShadowsMaxTrianglesPerBatch = 20000000");
+            ini.AppendLine("RainMapBatchMaxSize = 3000");
+            ini.AppendLine("RainMapBatchMaxTrianglesPerBatch = 10000000");
+            ini.AppendLine("ReflectionProbeBlend_Global = 0.5");
+            ini.AppendLine("ReflectionProbeBlend_Local = 0.25");
+            ini.AppendLine("ReflectionProbeBlend_StreamIn = 1.5");
+            ini.AppendLine("ReflectionProbeBlend_MovingBlendSpeed = 5.5");
+            ini.AppendLine();
+            ini.AppendLine("[Rendering/AsyncCompute]");
+            ini.AppendLine("RaytraceASBuild = true");
+            ini.AppendLine();
+            ini.AppendLine("[Rendering/VariableRateShading]");
+            ini.AppendLine("Enable = true");
+            ini.AppendLine("VarianceCutoff = 0.05");
+            ini.AppendLine("MotionFactor = 0.70");
+            ini.AppendLine("ScreenEdgeFactor = 1.0");
+            ini.AppendLine();
+            ini.AppendLine("[Rendering/Shadows]");
+            ini.AppendLine("CascadeFrontCullingPlaneDistance = 300.0");
+            ini.AppendLine("CascadeRange0 = 15.0");
+            ini.AppendLine("CascadeRange1 = 30.0");
+            ini.AppendLine("CascadeRange2 = 55.0");
+            ini.AppendLine("CascadeRange3 = 110.0");
+            ini.AppendLine();
+            ini.AppendLine("[Rendering/LUT]");
+            ini.AppendLine("Size = 64");
+            ini.AppendLine();
+            ini.AppendLine("[FSR2]");
+            ini.AppendLine("EnableHalton = true");
+            ini.AppendLine();
+            ini.AppendLine("[SnapToTerrainIk]");
+            ini.AppendLine("TraceAboveGroundDistance = 0.5");
+            ini.AppendLine("TraceBelowGroundDistance = 1.0");
             ini.AppendLine();
             ini.AppendLine("[LevelOfDetail]");
             ini.AppendLine("DecalsHideDistance = " + decalsDist);
             ini.AppendLine();
-            ini.AppendLine("[Rendering/Shadows]");
-            ini.AppendLine("CascadeRange0 = 12.000000");
-            ini.AppendLine("CascadeRange1 = 30.000000");
-            ini.AppendLine("CascadeRange2 = 75.000000");
-            ini.AppendLine("CascadeRange3 = 150.000000");
+            ini.AppendLine("[RayTracing]");
+            ini.AppendLine("AccelerationStructureBuildNumMax = " + rtAsBuild);
+            ini.AppendLine("UpdateProxyNumMax = " + rtProxyMax);
+            ini.AppendLine("ScratchBufferSizeMB = 64");
+            ini.AppendLine("GeometryUpdateBufferSizeMB = 64");
+            ini.AppendLine("InstanceFlagForceOMM2StateOnLODXAndAbove = 2");
+            ini.AppendLine("EnablePriorityFeedback = true");
+            ini.AppendLine();
+            ini.AppendLine("[RayTracing/LocalLight]");
+            ini.AppendLine("BatchSize = 128");
+            ini.AppendLine();
+            ini.AppendLine("[Editor/Denoising/ReBLUR/Direct]");
+            ini.AppendLine("HistoryFixFrameNum = 5");
+            ini.AppendLine();
+            ini.AppendLine("[Editor/Denoising/ReBLUR/Indirect]");
+            ini.AppendLine("HistoryFixFrameNum = 5");
+            ini.AppendLine();
+            ini.AppendLine("[Editor/Denoising/ReLAX/Direct]");
+            ini.AppendLine("DisocclusionThreshold = 0.002");
+            ini.AppendLine("HitDistanceReconstruction = 2");
+            ini.AppendLine("HistoryFixFrameNum = 2");
+            ini.AppendLine();
+            ini.AppendLine("[Editor/Denoising/ReLAX/Indirect]");
+            ini.AppendLine("DisocclusionThreshold = 0.002");
+            ini.AppendLine("HitDistanceReconstruction = 2");
+            ini.AppendLine("HistoryFixFrameNum = 2");
+            ini.AppendLine();
+            ini.AppendLine("[Editor/Denoising/NRD]");
+            ini.AppendLine("DisocclusionThreshold = 0.002");
+            ini.AppendLine("HitDistanceReconstruction = 2");
+            ini.AppendLine("HistoryFixFrameNum = 2");
+
             File.WriteAllText(iniPath, ini.ToString(), new UTF8Encoding(false));
-            log("Wrote engine\\config\\platform\\pc\\choomsync_perf.ini (" + hw.Tier + " tier)");
+            log(string.Format("Wrote engine\\config\\platform\\pc\\choomsync_perf.ini ({0} tier, {1}GB VRAM profile, VRS/AsyncCompute/Streaming/RT).", hw.Tier, hw.VramGb));
 
             // 2. Optimize verified high-cost/low-visual-impact settings in UserSettings.json (with permanent backup)
             OptimizeUserSettings(hw, log);
@@ -356,7 +595,8 @@ namespace ChoomSync
             ArrayList groups = root["data"] as ArrayList;
             if (groups == null) return;
 
-            // Only cap settings that are currently ABOVE optimal (never lowers someone already on Low)
+            // Preserve ALL high-impact visual settings (Textures High, Anisotropy 16x, Contact Shadows ON, LOD High, Mirrors High).
+            // Cap ONLY invisible/low-visual-loss FPS hogs and disable noisy post-process blur/grain.
             int crowdCapIdx = (hw.LogicalCores <= 8) ? 0 : 1; // Low for <=8 threads, Medium for >8 threads
             string crowdCapVal = crowdCapIdx == 0 ? "Low" : "Medium";
 
@@ -397,9 +637,23 @@ namespace ChoomSync
                     {
                         if (CapIndexOption(opt, 1, "Medium")) changed++;
                     }
+                    else if (name == "ShadowMeshQuality")
+                    {
+                        // Distant shadow mesh LOD: High (2) -> Medium (1) trims draw calls with almost invisible difference
+                        if (CapIndexOption(opt, 1, "Medium")) changed++;
+                    }
                     else if (name == "MaxDynamicDecals")
                     {
                         if (CapIndexOption(opt, 2, "High")) changed++;
+                    }
+                    else if (name == "FilmGrain" || name == "ChromaticAberration")
+                    {
+                        // Sharper image + minor post-process savings
+                        if (SetBoolOption(opt, false)) changed++;
+                    }
+                    else if (name == "MotionBlur")
+                    {
+                        if (CapIndexOption(opt, 0, "Off")) changed++;
                     }
                 }
             }
@@ -407,12 +661,20 @@ namespace ChoomSync
             if (changed > 0)
             {
                 File.WriteAllText(usPath, ser.Serialize(root), new UTF8Encoding(false));
-                log(string.Format("Optimized {0} high-cost graphics/crowd settings in UserSettings.json (Crowd->{1}, SSR<=High, VolFog/Clouds<=Medium).", changed, crowdCapVal));
+                log(string.Format("Optimized {0} high-cost setting(s) in UserSettings.json (kept Textures/LOD/ContactShadows High; capped Crowd->{1}, SSR<=High, VolFog/Clouds/ShadowMesh<=Med, Grain/CA/Blur OFF).", changed, crowdCapVal));
             }
             else
             {
-                log("UserSettings.json settings were already at or below optimal performance levels.");
+                log("UserSettings.json settings were already at visual-safe optimal performance levels.");
             }
+        }
+
+        private static bool SetBoolOption(Dictionary<string, object> opt, bool targetVal)
+        {
+            if (!opt.ContainsKey("value") || !(opt["value"] is bool)) return false;
+            if ((bool)opt["value"] == targetVal) return false;
+            opt["value"] = targetVal;
+            return true;
         }
 
         private static bool CapIndexOption(Dictionary<string, object> opt, int maxIdx, string targetVal)
@@ -1102,6 +1364,8 @@ namespace ChoomSync
         private Button _btnOptimize;
         private Button _btnClearCaches;
         private Button _btnRestoreVanilla;
+        private Button _btnHags;
+        private Button _btnDefender;
         private Button _btnBrowse;
         private Button _btnTailscale;
         private ProgressBar _progress;
@@ -1111,7 +1375,7 @@ namespace ChoomSync
         public MainForm()
         {
             Text = "ChoomSync v" + Program.APP_VERSION + " — Cyberpunk 2077 Co-op & Optimizer";
-            ClientSize = new Size(660, 725);
+            ClientSize = new Size(660, 765);
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
@@ -1207,7 +1471,7 @@ namespace ChoomSync
             statusCard.Controls.Add(_statusSummary);
 
             string[] keys = new string[] { "NightCoop", "RED4ext", "CET", "redscript", "ChoomSync", "PerfPack" };
-            string[] names = new string[] { "NightCoop 0.2.2-beta", "RED4ext 1.31.0", "Cyber Engine Tweaks", "redscript 1.0.2", "ChoomSync Mod v0.2", "Base-Game Perf Pack" };
+            string[] names = new string[] { "NightCoop 0.2.2-beta", "RED4ext 1.31.0", "Cyber Engine Tweaks", "redscript 1.0.2", "ChoomSync Mod v0.3", "Ultra-Smooth Perf Pack" };
             for (int i = 0; i < keys.Length; i++)
             {
                 int col = i % 2;
@@ -1231,11 +1495,11 @@ namespace ChoomSync
             }
 
             // Card 3: Base-Game Performance & Stutter Pack
-            Panel perfCard = MakeCard(pad, 290, w, 118);
+            Panel perfCard = MakeCard(pad, 290, w, 152);
             Controls.Add(perfCard);
 
             Label pTitle = new Label();
-            pTitle.Text = "BASE-GAME PERFORMANCE & STUTTER FIXES (100% REVERSIBLE)";
+            pTitle.Text = "BASE-GAME ULTRA-SMOOTH ENGINE & WINDOWS PERF PACK (100% REVERSIBLE)";
             pTitle.Font = new Font("Segoe UI", 8.5f, FontStyle.Bold);
             pTitle.ForeColor = AccentYellow;
             pTitle.Location = new Point(12, 8);
@@ -1243,7 +1507,7 @@ namespace ChoomSync
             perfCard.Controls.Add(pTitle);
 
             _chkPerfPack = new CheckBox();
-            _chkPerfPack.Text = "Auto-apply Streaming INI + Safe FPS Caps (Crowd->Med, SSR<=High, VolFog<=Med)";
+            _chkPerfPack.Text = "Auto-apply Ultra-Smooth Engine INI (Streaming/VRS/Async/RT) + Visual-Safe Caps";
             _chkPerfPack.Checked = true;
             _chkPerfPack.ForeColor = TextLight;
             _chkPerfPack.Location = new Point(14, 30);
@@ -1273,41 +1537,51 @@ namespace ChoomSync
             _btnRestoreVanilla.Click += OnRestoreVanillaClick;
             perfCard.Controls.Add(_btnRestoreVanilla);
 
+            _btnHags = MakeButton("Enable HAGS + Game Mode (DLSS Frame Gen)", 12, 114, 296, 28, Color.FromArgb(26, 44, 62), AccentCyan);
+            _btnHags.Font = new Font("Segoe UI", 8.5f, FontStyle.Bold);
+            _btnHags.Click += OnHagsClick;
+            perfCard.Controls.Add(_btnHags);
+
+            _btnDefender = MakeButton("Defender Exclusion (Stop .archive Hitches)", 316, 114, 290, 28, Color.FromArgb(34, 40, 60), TextLight);
+            _btnDefender.Font = new Font("Segoe UI", 8.5f);
+            _btnDefender.Click += OnDefenderClick;
+            perfCard.Controls.Add(_btnDefender);
+
             // Big Action Buttons
-            _btnInstall = MakeButton("1. Install / Update Co-op + Perf", pad, 418, (w - 12) / 2, 46, AccentYellow, BgDark);
+            _btnInstall = MakeButton("1. Install / Update Co-op + Perf", pad, 452, (w - 12) / 2, 46, AccentYellow, BgDark);
             _btnInstall.Font = new Font("Segoe UI", 10.5f, FontStyle.Bold);
             _btnInstall.Click += OnInstallClick;
             Controls.Add(_btnInstall);
 
-            _btnPlay = MakeButton("2. Auto-Update & Play!", pad + (w - 12) / 2 + 12, 418, (w - 12) / 2, 46, AccentCyan, BgDark);
+            _btnPlay = MakeButton("2. Auto-Update & Play!", pad + (w - 12) / 2 + 12, 452, (w - 12) / 2, 46, AccentCyan, BgDark);
             _btnPlay.Font = new Font("Segoe UI", 10.5f, FontStyle.Bold);
             _btnPlay.Click += OnPlayClick;
             Controls.Add(_btnPlay);
 
             // Progress Bar
             _progress = new ProgressBar();
-            _progress.Location = new Point(pad, 474);
+            _progress.Location = new Point(pad, 508);
             _progress.Size = new Size(w, 16);
             _progress.Style = ProgressBarStyle.Continuous;
             Controls.Add(_progress);
 
             _progressLabel = new Label();
-            _progressLabel.Location = new Point(pad, 494);
+            _progressLabel.Location = new Point(pad, 528);
             _progressLabel.Size = new Size(w, 20);
             _progressLabel.ForeColor = TextMuted;
             _progressLabel.Text = "Ready. Updates, base-game perf fixes & save backups run automatically.";
             Controls.Add(_progressLabel);
 
             // Card 4: Quick Guide
-            Panel guideCard = MakeCard(pad, 520, w, 74);
+            Panel guideCard = MakeCard(pad, 554, w, 78);
             Controls.Add(guideCard);
 
             Label gBody = new Label();
             gBody.Text =
-                "• In-Game Perf & Bug Fixes: Press your CET key -> ChoomSync -> \"Perf & Bug Fixes\" tab (live FPS / 1% low, Relic glitch & stuck combat/scanner fixes).\n" +
+                "• In-Game Perf & Bug Fixes: Press your CET key -> ChoomSync -> \"Perf & Bug Fixes\" tab (Ultra Smooth / High FPS / PT Boost, optional Dynamic Target-FPS Auto-Scaler, Relic glitch & stuck combat fixes).\n" +
                 "• Joining Co-op: Main Menu -> Co-op -> Join by code -> Ctrl+V your friend's invite code.";
-            gBody.Location = new Point(12, 10);
-            gBody.Size = new Size(w - 24, 56);
+            gBody.Location = new Point(12, 8);
+            gBody.Size = new Size(w - 24, 62);
             gBody.ForeColor = TextLight;
             guideCard.Controls.Add(gBody);
 
@@ -1320,12 +1594,12 @@ namespace ChoomSync
             _logBox.ForeColor = TextMuted;
             _logBox.BorderStyle = BorderStyle.FixedSingle;
             _logBox.Font = new Font("Consolas", 8.5f);
-            _logBox.Location = new Point(pad, 604);
-            _logBox.Size = new Size(w, 74);
+            _logBox.Location = new Point(pad, 642);
+            _logBox.Size = new Size(w, 76);
             Controls.Add(_logBox);
 
             // Footer
-            _btnTailscale = MakeButton("Optional: Install Tailscale VPN", pad, 686, 215, 28, Color.FromArgb(28, 32, 48), TextMuted);
+            _btnTailscale = MakeButton("Optional: Install Tailscale VPN", pad, 726, 215, 28, Color.FromArgb(28, 32, 48), TextMuted);
             _btnTailscale.Font = new Font("Segoe UI", 8.5f);
             _btnTailscale.Click += OnTailscaleClick;
             Controls.Add(_btnTailscale);
@@ -1334,7 +1608,7 @@ namespace ChoomSync
             secNote.Text = "Zero open ports • HTTPS allowlisted • SHA-256 verified";
             secNote.ForeColor = TextMuted;
             secNote.Font = new Font("Segoe UI", 8f);
-            secNote.Location = new Point(pad + 225, 692);
+            secNote.Location = new Point(pad + 225, 732);
             secNote.Size = new Size(w - 225, 20);
             secNote.TextAlign = ContentAlignment.MiddleRight;
             Controls.Add(secNote);
@@ -1346,6 +1620,10 @@ namespace ChoomSync
             if (overlays.Count > 0)
             {
                 Log("Tip: Background overlay(s) detected (" + string.Join(", ", overlays.ToArray()) + ") — close them if CET flickers or stutters.");
+            }
+            if (!PerfOptimizer.IsHagsEnabled())
+            {
+                Log("Tip: Windows HAGS is OFF — click 'Enable HAGS + Game Mode' and reboot once to unlock DLSS Frame Gen (~2x FPS on RTX 40/50)!");
             }
             await CheckRemoteManifestSilentAsync();
         }
@@ -1471,6 +1749,25 @@ namespace ChoomSync
             _btnOptimize.Enabled = !_busy && valid;
             _btnClearCaches.Enabled = !_busy;
             _btnRestoreVanilla.Enabled = !_busy && valid;
+            bool hagsOn = PerfOptimizer.IsHagsEnabled();
+            bool gmOn = PerfOptimizer.IsGameModeEnabled();
+            _btnHags.Enabled = !_busy;
+            if (hagsOn && gmOn)
+            {
+                _btnHags.Text = "● HAGS + Game Mode: ON (Frame Gen Ready)";
+                _btnHags.ForeColor = OkGreen;
+            }
+            else if (hagsOn)
+            {
+                _btnHags.Text = "HAGS: ON — Click to Enable Game Mode";
+                _btnHags.ForeColor = AccentCyan;
+            }
+            else
+            {
+                _btnHags.Text = "Enable HAGS + Game Mode (Unlock DLSS FG)";
+                _btnHags.ForeColor = AccentCyan;
+            }
+            _btnDefender.Enabled = !_busy && valid;
             _btnBrowse.Enabled = !_busy;
             _btnTailscale.Enabled = !_busy;
             _btnTailscale.Text = CoopEngine.IsTailscaleInstalled()
@@ -1571,6 +1868,79 @@ namespace ChoomSync
             finally { _busy = false; RefreshUiState(); }
         }
 
+        private async void OnHagsClick(object sender, EventArgs e)
+        {
+            if (_busy) return;
+            bool wasHags = PerfOptimizer.IsHagsEnabled();
+            DialogResult ans = MessageBox.Show(
+                this,
+                "Enable Windows Hardware-Accelerated GPU Scheduling (HAGS) and Windows Game Mode?\n\n" +
+                "• Unlocks DLSS 3/4 Frame Generation on RTX 40/50 GPUs (~2x FPS with zero visual loss)\n" +
+                "• Reduces background CPU scheduling jitter in Night City\n" +
+                "• Requires a one-time Windows restart to activate HAGS.",
+                "Enable Windows HAGS + Game Mode",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Information
+            );
+            if (ans != DialogResult.Yes) return;
+
+            _busy = true;
+            RefreshUiState();
+            try
+            {
+                bool ok = await Task.Run(delegate () { return PerfOptimizer.EnableHagsAndGameMode(Log); });
+                if (ok && !wasHags)
+                {
+                    SetProgress(100, "HAGS + Game Mode enabled! Reboot Windows once to unlock DLSS Frame Gen.");
+                    MessageBox.Show(
+                        this,
+                        "HAGS + Game Mode enabled!\n\nRestart Windows once, then turn ON DLSS Frame Generation in Cyberpunk's Graphics settings for a massive smooth FPS boost.",
+                        "Restart Required for HAGS",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information
+                    );
+                }
+                else if (ok)
+                {
+                    SetProgress(100, "Windows HAGS + Game Mode verified ON.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("HAGS error: " + ex.Message);
+            }
+            finally { _busy = false; RefreshUiState(); }
+        }
+
+        private async void OnDefenderClick(object sender, EventArgs e)
+        {
+            if (_busy || !CoopEngine.IsValidGameDir(_gameDir)) return;
+            DialogResult ans = MessageBox.Show(
+                this,
+                "Add a Windows Defender real-time scan exclusion for your Cyberpunk 2077 folder?\n\n" +
+                _gameDir + "\n\n" +
+                "This stops Windows Defender from scanning multi-gigabyte .archive files during streaming, eliminating random driving/loading micro-stutters.",
+                "Add Windows Defender Exclusion",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question
+            );
+            if (ans != DialogResult.Yes) return;
+
+            _busy = true;
+            RefreshUiState();
+            try
+            {
+                SetProgress(40, "Adding Windows Defender exclusion (approve UAC prompt)...");
+                bool ok = await Task.Run(delegate () { return PerfOptimizer.AddDefenderExclusion(_gameDir, Log); });
+                SetProgress(ok ? 100 : 0, ok ? "Windows Defender exclusion added for Cyberpunk 2077." : "Defender exclusion skipped or cancelled.");
+            }
+            catch (Exception ex)
+            {
+                Log("Defender exclusion error: " + ex.Message);
+            }
+            finally { _busy = false; RefreshUiState(); }
+        }
+
         private async Task<bool> RunInstallOrUpdateAsync(bool fullInstall, bool applyPerf)
         {
             using (HttpClient http = CoopEngine.CreateHttpClient(300))
@@ -1648,9 +2018,9 @@ namespace ChoomSync
                 await CoopEngine.SyncCompanionModAsync(http, _gameDir, manifest, Log);
                 CoopEngine.SaveInstalledVersions(_gameDir, installed);
 
-                if (applyPerf && (fullInstall || !PerfOptimizer.IsPerfPackApplied(_gameDir)))
+                if (applyPerf && (fullInstall || !PerfOptimizer.IsPerfPackCurrent(_gameDir)))
                 {
-                    SetProgress(97, "Applying Base-Game Performance & Stutter Pack...");
+                    SetProgress(97, "Applying Ultra-Smooth Base-Game Performance Pack...");
                     PerfOptimizer.ApplyBaseGamePerfPack(_gameDir, Log);
                 }
 
@@ -1705,7 +2075,7 @@ namespace ChoomSync
 
             string reason;
             bool applyPerf = _chkPerfPack.Checked;
-            bool needPerfWrite = applyPerf && !PerfOptimizer.IsPerfPackApplied(_gameDir);
+            bool needPerfWrite = applyPerf && !PerfOptimizer.IsPerfPackCurrent(_gameDir);
             if (needPerfWrite || (_remoteManifest != null && CoopEngine.NeedsUpdate(_gameDir, _remoteManifest, out reason)))
             {
                 if (!EnsureWritableOrPromptElevate()) return;

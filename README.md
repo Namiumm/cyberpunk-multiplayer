@@ -4,15 +4,16 @@ A security-hardened, customizable 2-player co-op launcher and additive companion
 
 ## Architecture
 
-- **`mod/cet/ChoomSync/` (`v0.2.0`)** — Additive in-game companion + base-game performance & bug-fix suite built on the official MIT-licensed NightCoop SDK (`nightcoop_sdk.lua`). **Zero forbidden hooks** (100% compliant with NightCoop's `docs/do-not-hook.md`):
-  - **Base-Game Performance & Bug Fixes (`Perf & Bug Fixes` tab):** Live FPS / 1% Low / >33ms hitch counter, self-validating Patch 2.5 engine presets (`Balanced`, `Max FPS`, `Visual Clarity`, `Reset Vanilla`), and 1-click fixes for vanilla Cyberpunk 2077 bugs (stuck Relic/screen glitch FX, stuck combat lock, stuck scanner/controls restrictions, stuck vehicle summon, and solo stuck slow-mo).
+- **`mod/cet/ChoomSync/` (`v0.3.0`)** — Additive in-game companion + visual-first base-game performance & bug-fix suite built on the official MIT-licensed NightCoop SDK (`nightcoop_sdk.lua`). **Zero forbidden hooks** (100% compliant with NightCoop's `docs/do-not-hook.md`):
+  - **Base-Game Ultra-Smooth Performance Suite (`Perf & Bug Fixes` tab):** Live FPS / 1% Low / >33ms hitch counter, self-validating Patch 2.5 REDengine 4 presets (`Ultra Smooth` default, `High FPS (Sharp)`, `PT / RT Boost`, and `Restore Vanilla`) tuned for zero potato-mode visuals (streaming time budgets, batching, VRS, Async Compute, reGLASS probe blending, LUT 64, ReBLUR/ReLAX/NRD denoiser clarity), plus an optional **Dynamic Target-FPS Auto-Scaler** that trims only peripheral RT/shadow/decal radius during dips and restores full quality when headroom returns.
+  - **1-Click Base-Game Bug Fixes:** Fixes stuck Relic/screen glitch FX, stuck combat lock, stuck scanner/controls restrictions, stuck vehicle summon, and solo stuck slow-mo.
   - Native menu actions in **`Esc → Co-op → Mods…`** (Toggle Panel, Ping Location, Catch Up to Host, Sync Save / Unstick NPC, Fix Stuck Glitch/Combat, Time & Weather requests).
   - Compact in-game **Co-op Mini-HUD** (role, live FPS/1% low, partner distance & compass direction, health bar, combat/vehicle/scene/downed badges, live Tailscale `Direct` vs `DERP` ping).
   - **Tactical Pings** (`REGROUP`, `ENEMY`, `LOOT`, `RIDE`) with temporary HUD map markers over NightCoop's encrypted SDK channel.
   - **Safe Guest Catch-Up & Far-Drift Alerts** when the host fast-travels far away.
-- **`installer/ChoomSync.cs` (`ChoomSync.exe` `v0.2.0`)** — Single-file, zero-dependency, self-updating Windows GUI app:
+- **`installer/ChoomSync.cs` (`ChoomSync.exe` `v0.3.0`)** — Single-file, zero-dependency, self-updating Windows GUI app:
   - **Auto-updates** ChoomSync Lua scripts, NightCoop/CET/redscript versions, and itself via SHA-256 verified `manifest.json`.
-  - **Hardware-Aware Base-Game Performance & Stutter Pack** (100% reversible): writes GPU-VRAM-tiered `engine\config\platform\pc\choomsync_perf.ini`, caps high-cost/low-visual-impact settings in `UserSettings.json` (with `UserSettings.pre-choomsync.json` backup), clears stale Patch 2.5 DX12/GPU/redscript stutter caches, detects conflicting overlays (RTSS/Afterburner/Overwolf), and boosts `Cyberpunk2077.exe` to High CPU priority on launch.
+  - **Hardware-Aware Ultra-Smooth Engine & Windows Perf Pack** (100% reversible): writes GPU-VRAM-tiered `engine\config\platform\pc\choomsync_perf.ini` (streaming time limits, async compute, VRS, batching, RT BVH/denoiser budgets — zero CTD memory pool hacks), caps only high-cost/low-visual-impact settings in `UserSettings.json` (preserving High Textures/Anisotropy/LOD/Contact Shadows, with `UserSettings.pre-choomsync.json` backup), clears stale Patch 2.5 DX12/GPU/redscript stutter caches, detects conflicting overlays (RTSS/Afterburner/Overwolf), boosts `Cyberpunk2077.exe` to High CPU priority on launch, and includes 1-click **Enable HAGS + Game Mode** (unlocks DLSS Frame Gen on RTX 40/50) and **Windows Defender Folder Exclusion** helpers.
 - **`launcher/`** — Zero-dependency Node.js Tailscale Launcher (`launch.bat` / `server.mjs`):
   - Local web UI bound **strictly to `127.0.0.1`** with a per-launch random CSRF token.
   - Automatic Cyberpunk 2077 save backups before every co-op launch.
@@ -30,3 +31,8 @@ A security-hardened, customizable 2-player co-op launcher and additive companion
 5. In Cyberpunk's Main Menu or Pause Menu → **Co-op**: Host starts a session (`Copy the invite`), Guest joins via `Join by code` (`Ctrl+V`).
 
 *(Power users can also run the Tailscale web dashboard via `launcher\launch.bat` or CLI setup via `scripts\setup-coop.ps1`.)*
+
+## Credits & Licenses
+
+- Built on the official MIT-licensed **NightCoop SDK** (`nightcoop_sdk.lua`).
+- REDengine 4 streaming, batching, Async Compute, VRS, Ray Tracing, and denoiser CVar tuning inspired by **Ultra Plus** (`sammilucia/cyberpunk-ultra-plus`, MIT License).

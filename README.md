@@ -4,12 +4,15 @@ A security-hardened, customizable 2-player co-op launcher and additive companion
 
 ## Architecture
 
-- **`mod/cet/ChoomSync/`** — Additive in-game companion mod built on the official MIT-licensed NightCoop SDK (`nightcoop_sdk.lua`). **Zero forbidden hooks** (100% compliant with NightCoop's `docs/do-not-hook.md`):
-  - Native menu actions in **`Esc → Co-op → Mods…`** (Toggle Panel, Ping Location, Catch Up to Host, Sync Save / Unstick NPC, Time & Weather requests).
-  - Compact in-game **Co-op Mini-HUD** (role, partner distance & compass direction, health bar, combat/vehicle/scene/downed badges, live Tailscale `Direct` vs `DERP` ping).
+- **`mod/cet/ChoomSync/` (`v0.2.0`)** — Additive in-game companion + base-game performance & bug-fix suite built on the official MIT-licensed NightCoop SDK (`nightcoop_sdk.lua`). **Zero forbidden hooks** (100% compliant with NightCoop's `docs/do-not-hook.md`):
+  - **Base-Game Performance & Bug Fixes (`Perf & Bug Fixes` tab):** Live FPS / 1% Low / >33ms hitch counter, self-validating Patch 2.5 engine presets (`Balanced`, `Max FPS`, `Visual Clarity`, `Reset Vanilla`), and 1-click fixes for vanilla Cyberpunk 2077 bugs (stuck Relic/screen glitch FX, stuck combat lock, stuck scanner/controls restrictions, stuck vehicle summon, and solo stuck slow-mo).
+  - Native menu actions in **`Esc → Co-op → Mods…`** (Toggle Panel, Ping Location, Catch Up to Host, Sync Save / Unstick NPC, Fix Stuck Glitch/Combat, Time & Weather requests).
+  - Compact in-game **Co-op Mini-HUD** (role, live FPS/1% low, partner distance & compass direction, health bar, combat/vehicle/scene/downed badges, live Tailscale `Direct` vs `DERP` ping).
   - **Tactical Pings** (`REGROUP`, `ENEMY`, `LOOT`, `RIDE`) with temporary HUD map markers over NightCoop's encrypted SDK channel.
   - **Safe Guest Catch-Up & Far-Drift Alerts** when the host fast-travels far away.
-  - **World Controls** (Time of Day & Weather requests via NightCoop's official `WorldAsk` vote/host flow).
+- **`installer/ChoomSync.cs` (`ChoomSync.exe` `v0.2.0`)** — Single-file, zero-dependency, self-updating Windows GUI app:
+  - **Auto-updates** ChoomSync Lua scripts, NightCoop/CET/redscript versions, and itself via SHA-256 verified `manifest.json`.
+  - **Hardware-Aware Base-Game Performance & Stutter Pack** (100% reversible): writes GPU-VRAM-tiered `engine\config\platform\pc\choomsync_perf.ini`, caps high-cost/low-visual-impact settings in `UserSettings.json` (with `UserSettings.pre-choomsync.json` backup), clears stale Patch 2.5 DX12/GPU/redscript stutter caches, detects conflicting overlays (RTSS/Afterburner/Overwolf), and boosts `Cyberpunk2077.exe` to High CPU priority on launch.
 - **`launcher/`** — Zero-dependency Node.js Tailscale Launcher (`launch.bat` / `server.mjs`):
   - Local web UI bound **strictly to `127.0.0.1`** with a per-launch random CSRF token.
   - Automatic Cyberpunk 2077 save backups before every co-op launch.

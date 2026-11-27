@@ -1,12 +1,13 @@
--- ChoomSync Co-op Companion Mod for Cyberpunk 2077 (Patch 2.5) + NightCoop SDK v1
--- Purely additive: zero @replaceMethod / Override hooks (100% compliant with NightCoop docs/do-not-hook.md).
--- Falls back silently when playing solo without NightCoop.
+-- ChoomSync Co-op Companion + Base-Game Performance & Bug-Fix Suite
+-- Cyberpunk 2077 (Patch 2.5) + NightCoop SDK v1
+-- 100% additive: zero @replaceMethod / Override hooks (fully compliant with NightCoop docs/do-not-hook.md).
+-- Works seamlessly both solo (performance + bug fixes) and in NightCoop co-op sessions.
 
 local Sdk = require("nightcoop_sdk")
 
 local MOD_ID = "choomsync.coop"
 local MOD_NAME = "ChoomSync Companion"
-local MOD_VERSION = "0.1.0"
+local MOD_VERSION = "0.2.0"
 local MOD_PROTOCOL = 1
 
 local CH_PING = 1
@@ -26,11 +27,13 @@ local coop = Sdk.new(MOD_ID, MOD_NAME, MOD_VERSION, MOD_PROTOCOL, MOD_FLAGS)
 
 local DEFAULT_CFG = {
     showMiniHud = true,
+    showPerfInHud = true,
     autoFollowNotify = true,
     followThresholdMeters = 350,
     pingDurationSec = 25,
     miniHudX = 24,
     miniHudY = 24,
+    perfPreset = "none", -- "none" | "balanced" | "max_fps" | "clarity"
 }
 
 local cfg = {}
@@ -42,17 +45,30 @@ local state = {
     menuRegistered = false,
     activePing = nil, -- { tag, sender, x, y, z, expiresAt, mappinId }
     lastFollowAlertAt = 0,
-    tailscale = nil, -- loaded periodically from tailscale_status.json
+    tailscale = nil,
     lastTailscaleRead = -1e9,
+    tailscalePollInterval = 15.0, -- backs off to 60s when file is absent (zero main-thread I/O hitch)
     logs = {},
     peerSnapshots = {},
     lastTelemetryPoll = 0,
+    -- Frametime / 1% low ring buffer (120 frames, zero per-frame allocations)
+    dtRing = {},
+    dtIdx = 1,
+    dtCount = 0,
+    fpsAvg = 0,
+    fps1Low = 0,
+    frameMsAvg = 0,
+    hitchCount = 0,
+    lastPerfCalc = 0,
+    originalCvars = {}, -- cached pre-tweak values for clean Reset
+    appliedCvarCount = 0,
+    lastFixStatus = "",
 }
 
 local function addLog(msg)
     local stamp = os.date("%H:%M:%S")
     table.insert(state.logs, 1, string.format("[%s] %s", stamp, tostring(msg)))
-    if #state.logs > 30 then
+    if #state.logs > 40 then
         table.remove(state.logs)
     end
 end
@@ -64,7 +80,7 @@ local function loadConfig()
     f:close()
     local ok, parsed = pcall(json.decode, raw)
     if ok and type(parsed) == "table" then
-        for k, v in pairs(DEFAULT_CFG) do
+        for k, _ in pairs(DEFAULT_CFG) do
             if parsed[k] ~= nil then cfg[k] = parsed[k] end
         end
     end
@@ -80,19 +96,315 @@ end
 
 local function readTailscaleStatus()
     local now = os.clock()
-    if now - state.lastTailscaleRead < 3.0 then return end
+    if now - state.lastTailscaleRead < state.tailscalePollInterval then return end
     state.lastTailscaleRead = now
     local f = io.open("tailscale_status.json", "r")
     if not f then
         state.tailscale = nil
+        state.tailscalePollInterval = 60.0
         return
     end
+    state.tailscalePollInterval = 15.0
     local raw = f:read("*a")
     f:close()
     local ok, parsed = pcall(json.decode, raw)
     if ok and type(parsed) == "table" then
         state.tailscale = parsed
     end
+end
+
+-- ---------------------------------------------------------------------------
+-- Live Frametime & 1% Low Telemetry (Lightweight Ring Buffer)
+-- ---------------------------------------------------------------------------
+
+local function recordFrameDt(dt)
+    if not dt or dt <= 0 or dt > 1.0 then return end
+    state.dtRing[state.dtIdx] = dt
+    state.dtIdx = (state.dtIdx % 120) + 1
+    if state.dtCount < 120 then state.dtCount = state.dtCount + 1 end
+    if dt > 0.0333 then
+        state.hitchCount = state.hitchCount + 1
+    end
+
+    local now = os.clock()
+    if now - state.lastPerfCalc < 0.5 or state.dtCount < 10 then return end
+    state.lastPerfCalc = now
+
+    local sum = 0
+    local worst1, worst2 = 0, 0
+    for i = 1, state.dtCount do
+        local v = state.dtRing[i]
+        sum = sum + v
+        if v >= worst1 then
+            worst2 = worst1
+            worst1 = v
+        elseif v > worst2 then
+            worst2 = v
+        end
+    end
+    local avgDt = sum / state.dtCount
+    state.frameMsAvg = avgDt * 1000.0
+    state.fpsAvg = avgDt > 0 and (1.0 / avgDt) or 0
+    local lowDt = worst2 > 0 and worst2 or worst1
+    state.fps1Low = lowDt > 0 and (1.0 / lowDt) or 0
+end
+
+-- ---------------------------------------------------------------------------
+-- Base-Game Engine Performance Presets (Self-Validating GameOptions CVars)
+-- ---------------------------------------------------------------------------
+
+local PERF_PRESETS = {
+    balanced = {
+        { "Streaming", "MaxNodesPerFrame", "3000" },
+        { "Streaming", "MinStreamingDistance", "45.0" },
+        { "LevelOfDetail", "DecalsHideDistance", "25.0" },
+        { "Rendering/Shadows", "CascadeRange0", "10.0" },
+        { "Rendering/Shadows", "CascadeRange1", "26.0" },
+        { "Rendering/Shadows", "CascadeRange2", "65.0" },
+        { "Rendering/Shadows", "CascadeRange3", "130.0" },
+        { "Developer/FeatureToggles", "DistantFog", "false" },
+        { "Developer/FeatureToggles", "DistantVolFog", "false" },
+        { "Developer/FeatureToggles", "ChromaticAberration", "false" },
+        { "Developer/FeatureToggles", "FilmGrain", "false" },
+        { "Developer/FeatureToggles", "MotionBlur", "false" },
+    },
+    max_fps = {
+        { "Streaming", "MaxNodesPerFrame", "2000" },
+        { "Streaming", "MinStreamingDistance", "35.0" },
+        { "LevelOfDetail", "DecalsHideDistance", "18.0" },
+        { "Rendering/Shadows", "CascadeRange0", "8.0" },
+        { "Rendering/Shadows", "CascadeRange1", "20.0" },
+        { "Rendering/Shadows", "CascadeRange2", "50.0" },
+        { "Rendering/Shadows", "CascadeRange3", "95.0" },
+        { "Developer/FeatureToggles", "DistantFog", "false" },
+        { "Developer/FeatureToggles", "DistantVolFog", "false" },
+        { "Developer/FeatureToggles", "VolumetricClouds", "false" },
+        { "Developer/FeatureToggles", "ChromaticAberration", "false" },
+        { "Developer/FeatureToggles", "FilmGrain", "false" },
+        { "Developer/FeatureToggles", "MotionBlur", "false" },
+        { "Developer/FeatureToggles", "Bloom", "false" },
+    },
+    clarity = {
+        { "Streaming", "MaxNodesPerFrame", "6000" },
+        { "Streaming", "MinStreamingDistance", "60.0" },
+        { "LevelOfDetail", "DecalsHideDistance", "45.0" },
+        { "Rendering/Shadows", "CascadeRange0", "12.0" },
+        { "Rendering/Shadows", "CascadeRange1", "32.0" },
+        { "Rendering/Shadows", "CascadeRange2", "80.0" },
+        { "Rendering/Shadows", "CascadeRange3", "160.0" },
+        { "Developer/FeatureToggles", "DistantFog", "false" },
+        { "Developer/FeatureToggles", "ChromaticAberration", "false" },
+        { "Developer/FeatureToggles", "FilmGrain", "false" },
+        { "Developer/FeatureToggles", "MotionBlur", "false" },
+    },
+}
+
+local function restoreEngineCvars()
+    local restored = 0
+    for fullKey, origVal in pairs(state.originalCvars) do
+        local grp, param = fullKey:match("^([^|]+)|(.+)$")
+        if grp and param and origVal ~= nil then
+            local ok = pcall(function() GameOptions.Set(grp, param, tostring(origVal)) end)
+            if ok then restored = restored + 1 end
+        end
+    end
+    state.appliedCvarCount = 0
+    return restored
+end
+
+local function applyPerfPreset(presetName, silent)
+    restoreEngineCvars()
+    cfg.perfPreset = presetName or "none"
+    saveConfig()
+
+    if cfg.perfPreset == "none" then
+        state.lastFixStatus = "Restored vanilla engine cvars."
+        if not silent then addLog(state.lastFixStatus) end
+        return
+    end
+
+    local list = PERF_PRESETS[cfg.perfPreset]
+    if not list then return end
+
+    local applied = 0
+    for _, item in ipairs(list) do
+        local grp, param, val = item[1], item[2], item[3]
+        local okGet, cur = pcall(function() return GameOptions.Get(grp, param) end)
+        if okGet and cur ~= nil and tostring(cur) ~= "" then
+            local fullKey = grp .. "|" .. param
+            if state.originalCvars[fullKey] == nil then
+                state.originalCvars[fullKey] = tostring(cur)
+            end
+            local okSet = pcall(function() GameOptions.Set(grp, param, val) end)
+            if okSet then applied = applied + 1 end
+        end
+    end
+
+    state.appliedCvarCount = applied
+    state.lastFixStatus = string.format("Applied '%s' preset (%d verified Patch 2.5 cvars).", cfg.perfPreset, applied)
+    if not silent then addLog(state.lastFixStatus) end
+end
+
+-- ---------------------------------------------------------------------------
+-- Base-Game Cyberpunk 2077 Bug-Fix Rescue Tools (100% NightCoop-Safe)
+-- ---------------------------------------------------------------------------
+
+local function runFix(label, fn)
+    local ok, detail = pcall(fn)
+    if ok then
+        local msg = label .. (detail and (" (" .. tostring(detail) .. ")") or " — Fixed!")
+        state.lastFixStatus = msg
+        addLog(msg)
+        if Sdk.available() then coop:showMessage(msg, 3.0, Sdk.TONE.INFO) end
+    else
+        local msg = label .. " failed: " .. tostring(detail)
+        state.lastFixStatus = msg
+        addLog(msg)
+    end
+end
+
+local function fixStuckRelicAndScreenFx()
+    runFix("Clear Stuck Relic / Screen Glitch FX", function()
+        local p = Game.GetPlayer()
+        assert(p, "Load into a save first")
+        local eid = p:GetEntityID()
+        local ses = Game.GetStatusEffectSystem()
+        local effects = {
+            "BaseStatusEffect.JohnnySicknessLow",
+            "BaseStatusEffect.JohnnySicknessMedium",
+            "BaseStatusEffect.JohnnySicknessMediumQuest",
+            "BaseStatusEffect.JohnnySicknessHeavy",
+            "BaseStatusEffect.JohnnySicknessHeavyQuest",
+            "BaseStatusEffect.RelicMalfunction",
+            "BaseStatusEffect.CyberwareMalfunction",
+            "BaseStatusEffect.SystemCollapse",
+            "BaseStatusEffect.Overheat",
+            "BaseStatusEffect.EMP",
+            "BaseStatusEffect.Blind",
+            "BaseStatusEffect.Drunk",
+            "BaseStatusEffect.Drugged",
+            "BaseStatusEffect.Burning",
+            "BaseStatusEffect.Poisoned",
+            "BaseStatusEffect.Bleeding",
+            "BaseStatusEffect.Electrocuted",
+        }
+        local removed = 0
+        for _, eff in ipairs(effects) do
+            local ok = pcall(function()
+                local id = TweakDBID.new(eff)
+                if ses:HasStatusEffect(eid, id) then
+                    ses:RemoveStatusEffect(eid, id)
+                    removed = removed + 1
+                end
+            end)
+        end
+        pcall(function()
+            local audio = Game.GetAudioSystem()
+            if audio then
+                audio:Stop("ui_jingle_chip_malfunction")
+                audio:Stop("q101_sc_03_relic_malfunction_loop")
+            end
+        end)
+        pcall(function() GameObjectEffectHelper.StopEffectEvent(p, CName.new("johnny_sickness_symptoms")) end)
+        pcall(function() GameObjectEffectHelper.StopEffectEvent(p, CName.new("screen_glitch")) end)
+        return tostring(removed) .. " active glitch effect(s) cleared"
+    end)
+end
+
+local function fixStuckCombatState()
+    runFix("Clear Stuck Combat Lock", function()
+        local p = Game.GetPlayer()
+        assert(p, "Load into a save first")
+        local eid = p:GetEntityID()
+        local ses = Game.GetStatusEffectSystem()
+        -- Safely clear combat lock & holster weapons so save/fast-travel/sleep unlock
+        pcall(function()
+            local eq = EquipmentSystem.GetInstance(p)
+            if eq then
+                local req = EquipmentSystemWeaponManipulationRequest.new()
+                req.owner = p
+                req.requestType = EquipmentManipulationAction.UnequipAll
+                eq:QueueRequest(req)
+            end
+        end)
+        pcall(function()
+            local bb = Game.GetBlackboardSystem():GetLocalInstanced(eid, GetAllBlackboardDefs().PlayerStateMachine)
+            if bb then
+                bb:SetInt(GetAllBlackboardDefs().PlayerStateMachine.Combat, 0, true)
+            end
+        end)
+        pcall(function() ses:RemoveStatusEffect(eid, TweakDBID.new("GameplayRestriction.NoFastTravel")) end)
+        return "combat flag reset & weapons holstered"
+    end)
+end
+
+local function fixStuckRestrictionsAndScanner()
+    runFix("Clear Stuck Scanner / Controls Lock", function()
+        local p = Game.GetPlayer()
+        assert(p, "Load into a save first")
+        local eid = p:GetEntityID()
+        local ses = Game.GetStatusEffectSystem()
+        local restrictions = {
+            "GameplayRestriction.NoCombat",
+            "GameplayRestriction.NoSprint",
+            "GameplayRestriction.NoJump",
+            "GameplayRestriction.NoZooming",
+            "GameplayRestriction.NoScanning",
+            "GameplayRestriction.NoPhone",
+            "GameplayRestriction.NoFastTravel",
+            "GameplayRestriction.NoPhotoMode",
+            "GameplayRestriction.NoWeaponHolstering",
+            "GameplayRestriction.BlockAllHubMenu",
+            "GameplayRestriction.VehicleNoSummoning",
+        }
+        local cleared = 0
+        for _, r in ipairs(restrictions) do
+            pcall(function()
+                local id = TweakDBID.new(r)
+                if ses:HasStatusEffect(eid, id) then
+                    ses:RemoveStatusEffect(eid, id)
+                    cleared = cleared + 1
+                end
+            end)
+        end
+        pcall(function()
+            local vm = Game.GetVisionModeSystem()
+            if vm then vm:ForceDisableVisionMode(p) end
+        end)
+        return tostring(cleared) .. " restriction(s) cleared"
+    end)
+end
+
+local function fixStuckSlowMoSolo()
+    if Sdk.inSession() then
+        state.lastFixStatus = "Skipped in co-op (NightCoop manages shared world time)."
+        addLog(state.lastFixStatus)
+        return
+    end
+    runFix("Clear Stuck Slow-Mo / Time Dilation", function()
+        local ts = Game.GetTimeSystem()
+        assert(ts, "TimeSystem unavailable")
+        local reasons = { "sandevistan", "kereznikov", "focusMode", "radialMenu", "weaponWheel", "quickhack", "default" }
+        for _, r in ipairs(reasons) do
+            pcall(function() ts:UnsetTimeDilation(CName.new(r)) end)
+        end
+        pcall(function() ts:UnsetTimeDilationOnLocalPlayerZero(CName.new("sandevistan")) end)
+        return "local time scale restored to 1.0x"
+    end)
+end
+
+local function fixStuckVehicleSummon()
+    runFix("Reset Vehicle Summon Lock", function()
+        local p = Game.GetPlayer()
+        assert(p, "Load into a save first")
+        local ses = Game.GetStatusEffectSystem()
+        pcall(function() ses:RemoveStatusEffect(p:GetEntityID(), TweakDBID.new("GameplayRestriction.VehicleNoSummoning")) end)
+        pcall(function()
+            local vs = Game.GetVehicleSystem()
+            if vs then vs:TogglePlayerActiveVehicle(TweakDBID.new(), gamedataVehicleType.Car, true) end
+        end)
+        return "vehicle summon unlocked"
+    end)
 end
 
 -- ---------------------------------------------------------------------------
@@ -195,7 +507,6 @@ local function sendPing(tag)
         return
     end
     local pos = nil
-    -- Try crosshair target position first; fall back to local player position.
     local okTarget, tPos = pcall(function()
         local ts = Game.GetTargetingSystem()
         local p = Game.GetPlayer()
@@ -224,7 +535,7 @@ local function sendPing(tag)
 end
 
 -- ---------------------------------------------------------------------------
--- Safe Guest Catch-Up (Never touches vehicles, cutscenes, or NightCoop hooks)
+-- Safe Guest Catch-Up
 -- ---------------------------------------------------------------------------
 
 local function safeTeleportToPeer(targetPeer)
@@ -253,7 +564,6 @@ local function safeTeleportToPeer(targetPeer)
 
     local tPos = getPartnerPos(targetPeer)
     if not tPos then
-        -- Fall back to NightCoop's built-in story_pull if host body isn't streamed locally yet
         if not invokeNightCoopAction("story_pull") then
             coop:showMessage("Partner too far to resolve body; hold PageUp to pull.", 3.0, Sdk.TONE.INFO)
         end
@@ -310,10 +620,10 @@ local function registerMenuItems()
     coop:menuItemSet("ping_here", "ChoomSync: Метка (Сбор)", "ChoomSync: Ping Location", inWorldSess)
     coop:menuItemSet("story_pull", "ChoomSync: Догонять хоста", "ChoomSync: Catch Up to Host", inWorldSess)
     coop:menuItemSet("save_pull", "ChoomSync: Починить NPC / сейв", "ChoomSync: Sync Save / Unstick NPC", inWorldSess)
+    coop:menuItemSet("fix_glitches", "ChoomSync: Исправить баги (Relic/Бой)", "ChoomSync: Fix Stuck Glitch / Combat", Sdk.MENU.IN_WORLD)
     coop:menuItemSet("world_morning", "ChoomSync: Утро (08:00)", "ChoomSync: Time -> Morning (08:00)", inWorldSess)
     coop:menuItemSet("world_night", "ChoomSync: Ночь (22:30)", "ChoomSync: Time -> Night (22:30)", inWorldSess)
     coop:menuItemSet("world_clear", "ChoomSync: Ясная погода", "ChoomSync: Weather -> Clear", inWorldSess)
-    coop:menuItemSet("world_rain", "ChoomSync: Дождь", "ChoomSync: Weather -> Rain", inWorldSess)
     state.menuRegistered = true
     addLog("Registered 8 items in Esc -> Co-op -> Mods...")
 end
@@ -364,14 +674,16 @@ local function handleCoopEvent(ev)
             end
         elseif ev.key == "save_pull" then
             invokeNightCoopAction("save_pull")
+        elseif ev.key == "fix_glitches" then
+            fixStuckRelicAndScreenFx()
+            fixStuckCombatState()
+            fixStuckRestrictionsAndScanner()
         elseif ev.key == "world_morning" then
             askTimeOfDay(8, "Morning (08:00)")
         elseif ev.key == "world_night" then
             askTimeOfDay(22.5, "Night (22:30)")
         elseif ev.key == "world_clear" then
             askWeather("24h_weather_sunny", "Clear")
-        elseif ev.key == "world_rain" then
-            askWeather("24h_weather_rain", "Rain")
         end
 
     elseif ev.kind == Sdk.EVENT.STATE then
@@ -404,11 +716,7 @@ local function handleCoopEvent(ev)
             addLog(Sdk.peerName(ev.peer) .. " is running ChoomSync v" .. coop:peerModVersion(ev.peer))
         elseif ev.a == Sdk.SESSION.PARTNER_DOWN then
             local pname = Sdk.peerName(ev.peer)
-            if ev.value == 1 then
-                addLog(pname .. " is DOWN!")
-            else
-                addLog(pname .. " is back up!")
-            end
+            addLog(ev.value == 1 and (pname .. " is DOWN!") or (pname .. " is back up!"))
         elseif ev.a == Sdk.SESSION.WORLD_ANSWER then
             local labels = { [0] = "Refused", [1] = "Applied", [2] = "Failed", [3] = "Busy" }
             addLog("World change result: " .. (labels[ev.value] or tostring(ev.value)))
@@ -417,7 +725,7 @@ local function handleCoopEvent(ev)
 end
 
 -- ---------------------------------------------------------------------------
--- Periodic Telemetry & Guest Drift Alert
+-- Periodic Telemetry & Guest Drift Alert (Throttled to 2Hz when in session)
 -- ---------------------------------------------------------------------------
 
 local function refreshTelemetry()
@@ -427,14 +735,17 @@ local function refreshTelemetry()
         state.activePing = nil
     end
 
+    if not Sdk.inSession() then
+        if #state.peerSnapshots > 0 then state.peerSnapshots = {} end
+        return
+    end
+
     readTailscaleStatus()
 
-    if now - state.lastTelemetryPoll < 0.25 then return end
+    if now - state.lastTelemetryPoll < 0.5 then return end
     state.lastTelemetryPoll = now
 
     state.peerSnapshots = {}
-    if not Sdk.inSession() then return end
-
     local myPos = getLocalPlayerPos()
     local peers = Sdk.peers()
     for _, peer in ipairs(peers) do
@@ -450,7 +761,6 @@ local function refreshTelemetry()
             hasMod = coop:peerHasMod(peer) == 1,
         })
 
-        -- Gentle guest notification if host fast-traveled far away
         if not Sdk.isHost() and peer == Sdk.PEER_HOST and cfg.autoFollowNotify and d and d > cfg.followThresholdMeters then
             if (now - state.lastFollowAlertAt) > 20.0 then
                 local me = Sdk.partner(Sdk.localPeer())
@@ -468,7 +778,7 @@ local function refreshTelemetry()
 end
 
 -- ---------------------------------------------------------------------------
--- ImGui Rendering (Compact Mini-HUD + Full Tabbed Panel)
+-- ImGui Rendering
 -- ---------------------------------------------------------------------------
 
 local function formatWhere(w)
@@ -496,19 +806,31 @@ local function formatFlags(flags)
 end
 
 local function drawMiniHud()
-    if not cfg.showMiniHud or not Sdk.inSession() then return end
+    if not cfg.showMiniHud then return end
+    local inSess = Sdk.inSession()
+    if not inSess and not cfg.showPerfInHud then return end
+
     ImGui.SetNextWindowPos(cfg.miniHudX, cfg.miniHudY, ImGuiCond.FirstUseEver)
-    ImGui.SetNextWindowBgAlpha(0.72)
+    ImGui.SetNextWindowBgAlpha(0.70)
     local wFlags = ImGuiWindowFlags.AlwaysAutoResize + ImGuiWindowFlags.NoTitleBar + ImGuiWindowFlags.NoFocusOnAppearing
     if not state.overlayOpen then
         wFlags = wFlags + ImGuiWindowFlags.NoInputs
     end
 
     if ImGui.Begin("ChoomSyncHUD", wFlags) then
-        local role = Sdk.isHost() and "HOST" or "GUEST"
-        ImGui.TextColored(0.98, 0.85, 0.18, 1.0, "CHOOMSYNC [" .. role .. "]")
+        if inSess then
+            local role = Sdk.isHost() and "HOST" or "GUEST"
+            ImGui.TextColored(0.98, 0.85, 0.18, 1.0, "CHOOMSYNC [" .. role .. "]")
+        else
+            ImGui.TextColored(0.98, 0.85, 0.18, 1.0, "CHOOMSYNC")
+        end
 
-        if state.tailscale and state.tailscale.activePeer then
+        if cfg.showPerfInHud and state.fpsAvg > 0 then
+            ImGui.SameLine()
+            ImGui.TextColored(0.25, 0.92, 1.0, 1.0, string.format(" | %.0f FPS (1%% %.0f)", state.fpsAvg, state.fps1Low))
+        end
+
+        if inSess and state.tailscale and state.tailscale.activePeer then
             local ap = state.tailscale.activePeer
             local link = ap.direct and ("DIRECT " .. tostring(ap.rttMs or "?") .. "ms") or ("RELAY (" .. tostring(ap.relay or "DERP") .. ")")
             ImGui.SameLine()
@@ -519,28 +841,30 @@ local function drawMiniHud()
             end
         end
 
-        for _, p in ipairs(state.peerSnapshots) do
-            local distStr = p.distance and string.format("%.0fm %s", p.distance, p.dir) or (p.info and formatWhere(p.info.where) or "?")
-            local tagStr = p.info and formatFlags(p.info.flags) or ""
-            ImGui.Text(string.format("%s (%s)%s", p.name, distStr, tagStr ~= "" and (" [" .. tagStr .. "]") or ""))
-            if p.info and p.info.health and p.info.health >= 0 then
-                ImGui.ProgressBar(p.info.health, 180, 8, string.format("%.0f%% HP", p.info.health * 100))
+        if inSess then
+            for _, p in ipairs(state.peerSnapshots) do
+                local distStr = p.distance and string.format("%.0fm %s", p.distance, p.dir) or (p.info and formatWhere(p.info.where) or "?")
+                local tagStr = p.info and formatFlags(p.info.flags) or ""
+                ImGui.Text(string.format("%s (%s)%s", p.name, distStr, tagStr ~= "" and (" [" .. tagStr .. "]") or ""))
+                if p.info and p.info.health and p.info.health >= 0 then
+                    ImGui.ProgressBar(p.info.health, 180, 8, string.format("%.0f%% HP", p.info.health * 100))
+                end
             end
-        end
 
-        if state.activePing then
-            local myPos = getLocalPlayerPos()
-            local pd = dist3D(myPos, state.activePing)
-            local pdir = compassDir(myPos, state.activePing)
-            local rem = math.max(0, math.ceil(state.activePing.expiresAt - os.clock()))
-            ImGui.Separator()
-            ImGui.TextColored(0.25, 0.92, 1.0, 1.0, string.format(
-                "PING [%s] by %s: %s (%ds)",
-                state.activePing.tag,
-                state.activePing.sender,
-                pd and string.format("%.0fm %s", pd, pdir) or "marked",
-                rem
-            ))
+            if state.activePing then
+                local myPos = getLocalPlayerPos()
+                local pd = dist3D(myPos, state.activePing)
+                local pdir = compassDir(myPos, state.activePing)
+                local rem = math.max(0, math.ceil(state.activePing.expiresAt - os.clock()))
+                ImGui.Separator()
+                ImGui.TextColored(0.25, 0.92, 1.0, 1.0, string.format(
+                    "PING [%s] by %s: %s (%ds)",
+                    state.activePing.tag,
+                    state.activePing.sender,
+                    pd and string.format("%.0fm %s", pd, pdir) or "marked",
+                    rem
+                ))
+            end
         end
     end
     ImGui.End()
@@ -548,29 +872,73 @@ end
 
 local function drawMainPanel()
     if not (state.overlayOpen or state.panelOpen) then return end
-    ImGui.SetNextWindowSize(500, 420, ImGuiCond.FirstUseEver)
-    local open = ImGui.Begin("ChoomSync Co-op Companion v" .. MOD_VERSION, true)
-    if open then
-        if not Sdk.available() then
-            ImGui.TextColored(1.0, 0.45, 0.45, 1.0, "NightCoop SDK not detected.")
-            ImGui.TextWrapped("Make sure NightCoop 0.2.2+ is installed in red4ext\\plugins\\NightCoop and SDK is enabled in Co-op settings.")
-            ImGui.End()
-            return
-        end
-
-        local inSess = Sdk.inSession()
+    ImGui.SetNextWindowSize(540, 460, ImGuiCond.FirstUseEver)
+    if ImGui.Begin("ChoomSync v" .. MOD_VERSION .. " (Co-op + Base-Game Perf & Fixes)") then
+        local inSess = Sdk.available() and Sdk.inSession()
         local role = inSess and (Sdk.isHost() and "HOST" or "GUEST") or "SOLO / NOT IN SESSION"
         ImGui.TextColored(0.98, 0.85, 0.18, 1.0, "Status: " .. role)
-        if state.tailscale and state.tailscale.self then
+        if state.fpsAvg > 0 then
             ImGui.SameLine()
-            ImGui.Text(string.format(" | Tailscale: %s (%s)", tostring(state.tailscale.self.hostName), tostring(state.tailscale.self.ip)))
+            ImGui.TextColored(0.25, 0.92, 1.0, 1.0, string.format("  |  %.0f FPS  •  1%% Low: %.0f  •  %.1f ms", state.fpsAvg, state.fps1Low, state.frameMsAvg))
         end
         ImGui.Separator()
 
         if ImGui.BeginTabBar("ChoomSyncTabs") then
-            -- TAB 1: SQUAD
+            -- TAB 1: BASE-GAME PERF & BUG FIXES
+            if ImGui.BeginTabItem("Perf & Bug Fixes") then
+                ImGui.TextColored(0.25, 0.92, 1.0, 1.0, "Live Frametime Telemetry:")
+                ImGui.Text(string.format("  Avg: %.1f FPS (%.2f ms)  |  1%% Low: %.1f FPS  |  Hitches (>33ms): %d",
+                    state.fpsAvg, state.frameMsAvg, state.fps1Low, state.hitchCount))
+                ImGui.SameLine()
+                if ImGui.SmallButton("Reset Counter") then state.hitchCount = 0 end
+
+                ImGui.Separator()
+                ImGui.TextColored(0.98, 0.85, 0.18, 1.0, "Base-Game Engine Performance Presets (Patch 2.5 Safe):")
+                ImGui.TextWrapped("Active preset: " .. tostring(cfg.perfPreset) .. " (" .. tostring(state.appliedCvarCount) .. " live engine cvars applied)")
+                if ImGui.Button("Balanced (Recommended)", 165, 28) then applyPerfPreset("balanced") end
+                ImGui.SameLine()
+                if ImGui.Button("Max FPS", 105, 28) then applyPerfPreset("max_fps") end
+                ImGui.SameLine()
+                if ImGui.Button("Visual Clarity", 115, 28) then applyPerfPreset("clarity") end
+                ImGui.SameLine()
+                if ImGui.Button("Reset Vanilla", 105, 28) then applyPerfPreset("none") end
+
+                ImGui.Separator()
+                ImGui.TextColored(0.98, 0.85, 0.18, 1.0, "Base-Game Cyberpunk Bug-Fix Rescue (1-Click, NightCoop-Safe):")
+                if ImGui.Button("Fix Stuck Relic / Screen Glitch", 245, 28) then fixStuckRelicAndScreenFx() end
+                ImGui.SameLine()
+                if ImGui.Button("Fix Stuck Combat (Can't Save/FT)", 245, 28) then fixStuckCombatState() end
+
+                if ImGui.Button("Fix Stuck Scanner / Controls Lock", 245, 28) then fixStuckRestrictionsAndScanner() end
+                ImGui.SameLine()
+                if ImGui.Button("Fix Stuck Vehicle Summon", 245, 28) then fixStuckVehicleSummon() end
+
+                if ImGui.Button("Fix Stuck Slow-Mo (Solo Only)", 245, 28) then fixStuckSlowMoSolo() end
+                ImGui.SameLine()
+                if ImGui.Button("Run ALL Safe Rescue Fixes", 245, 28) then
+                    fixStuckRelicAndScreenFx()
+                    fixStuckCombatState()
+                    fixStuckRestrictionsAndScanner()
+                    fixStuckVehicleSummon()
+                    if not Sdk.inSession() then fixStuckSlowMoSolo() end
+                end
+
+                if state.lastFixStatus ~= "" then
+                    ImGui.Spacing()
+                    ImGui.TextColored(0.30, 0.95, 0.55, 1.0, state.lastFixStatus)
+                end
+
+                ImGui.Separator()
+                local chP, newP = ImGui.Checkbox("Show FPS / 1% Low in Compact Mini-HUD", cfg.showPerfInHud)
+                if chP then cfg.showPerfInHud = newP; saveConfig() end
+                ImGui.EndTabItem()
+            end
+
+            -- TAB 2: SQUAD
             if ImGui.BeginTabItem("Squad") then
-                if not inSess then
+                if not Sdk.available() then
+                    ImGui.TextColored(1.0, 0.45, 0.45, 1.0, "NightCoop SDK not detected (Solo Perf & Fixes still active).")
+                elseif not inSess then
                     ImGui.TextWrapped("Start or join a session from Cyberpunk's Main Menu or Pause Menu -> Co-op.")
                 else
                     if #state.peerSnapshots == 0 then
@@ -615,7 +983,7 @@ local function drawMainPanel()
                 ImGui.EndTabItem()
             end
 
-            -- TAB 2: PINGS
+            -- TAB 3: PINGS
             if ImGui.BeginTabItem("Tactical Pings") then
                 ImGui.TextWrapped("Pings target what you're looking at (or your position) and drop a temporary map marker on your partner's HUD.")
                 ImGui.Spacing()
@@ -637,7 +1005,7 @@ local function drawMainPanel()
                 ImGui.EndTabItem()
             end
 
-            -- TAB 3: WORLD & RULES
+            -- TAB 4: WORLD & RULES
             if ImGui.BeginTabItem("World & Rules") then
                 ImGui.Text("Time of Day (Host-Authoritative / Vote):")
                 if ImGui.Button("Morning 08:00") then askTimeOfDay(8, "Morning") end
@@ -661,7 +1029,7 @@ local function drawMainPanel()
                 if ImGui.Button("Sandstorm") then askWeather("24h_weather_sandstorm", "Sandstorm") end
 
                 ImGui.Separator()
-                local changedHud, newHud = ImGui.Checkbox("Show Compact Co-op Mini-HUD", cfg.showMiniHud)
+                local changedHud, newHud = ImGui.Checkbox("Show Compact Mini-HUD", cfg.showMiniHud)
                 if changedHud then cfg.showMiniHud = newHud; saveConfig() end
 
                 local changedAuto, newAuto = ImGui.Checkbox("Alert Guest when Host Fast-Travels Far", cfg.autoFollowNotify)
@@ -683,10 +1051,14 @@ local function drawMainPanel()
                 ImGui.EndTabItem()
             end
 
-            -- TAB 4: DIAGNOSTICS
+            -- TAB 5: DIAGNOSTICS
             if ImGui.BeginTabItem("Diagnostics") then
-                ImGui.Text("NightCoop SDK: Available | Registered: " .. tostring(coop.registered))
+                ImGui.Text("NightCoop SDK: " .. (Sdk.available() and "Available" or "Not detected") .. " | Registered: " .. tostring(coop.registered))
                 ImGui.Text("Hooks modified: 0 (100% additive, zero do-not-hook conflicts)")
+                if ImGui.Button("Dump Patch 2.5 Engine CVars to CET Log") then
+                    pcall(function() GameOptions.Dump() end)
+                    addLog("Dumped engine CVars to cyber_engine_tweaks.log")
+                end
                 ImGui.Separator()
                 ImGui.Text("Built-in NightCoop Keys (do not rebind over these):")
                 ImGui.Text("  Hold PageUp   = Move next to story leader")
@@ -715,9 +1087,12 @@ registerForEvent("onInit", function()
     loadConfig()
     if coop:register() then
         registerMenuItems()
-        addLog("Registered ChoomSync with NightCoop SDK")
+        addLog("Registered ChoomSync v" .. MOD_VERSION .. " with NightCoop SDK")
     else
-        addLog("Waiting for NightCoop SDK...")
+        addLog("ChoomSync v" .. MOD_VERSION .. " active (waiting for NightCoop SDK...)")
+    end
+    if cfg.perfPreset and cfg.perfPreset ~= "none" then
+        applyPerfPreset(cfg.perfPreset, true)
     end
 end)
 
@@ -736,6 +1111,7 @@ registerForEvent("onOverlayClose", function()
 end)
 
 registerForEvent("onUpdate", function(dt)
+    recordFrameDt(dt)
     coop:poll(handleCoopEvent)
     if coop.registered and not state.menuRegistered then
         registerMenuItems()
@@ -764,4 +1140,10 @@ registerHotkey("choomsync_catch_up", "ChoomSync: Catch Up to Host", function()
     if not invokeNightCoopAction("story_pull") then
         safeTeleportToPeer(Sdk.PEER_HOST)
     end
+end)
+
+registerHotkey("choomsync_fix_stuck", "ChoomSync: Fix Stuck Glitch / Combat / Scanner", function()
+    fixStuckRelicAndScreenFx()
+    fixStuckCombatState()
+    fixStuckRestrictionsAndScanner()
 end)

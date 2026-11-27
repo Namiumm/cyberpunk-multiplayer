@@ -1,8 +1,10 @@
 {
   "showMiniHud": true,
+  "showPerfInHud": true,
   "autoFollowNotify": true,
   "followThresholdMeters": 350,
   "pingDurationSec": 25,
   "miniHudX": 24,
-  "miniHudY": 24
+  "miniHudY": 24,
+  "perfPreset": "balanced"
 }
